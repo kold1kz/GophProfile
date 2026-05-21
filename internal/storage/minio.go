@@ -6,8 +6,12 @@ import (
 	"net/url"
 	"time"
 
+	"gophprofile/internal/observability"
+
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 )
 
 // MinIOStorage работает с MinIO как с S3-совместимым объектным хранилищем.
@@ -83,19 +87,33 @@ func (s *MinIOStorage) ensureBucket(ctx context.Context) error {
 
 // Upload сохраняет объект в bucket под переданным ключом.
 func (s *MinIOStorage) Upload(ctx context.Context, key, contentType string, size int64, body io.Reader) error {
+	ctx, span := observability.Tracer().Start(ctx, "s3.upload_object")
+	defer span.End()
+	span.SetAttributes(attribute.String("s3.key", key), attribute.String("content_type", contentType), attribute.Int64("size", size))
 	_, err := s.client.PutObject(ctx, s.bucket, key, body, size, minio.PutObjectOptions{ContentType: contentType})
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	}
 	return err
 }
 
 // Download открывает объект на чтение и возвращает его content type.
 func (s *MinIOStorage) Download(ctx context.Context, key string) (io.ReadCloser, string, error) {
+	ctx, span := observability.Tracer().Start(ctx, "s3.download_object")
+	defer span.End()
+	span.SetAttributes(attribute.String("s3.key", key))
 	obj, err := s.client.GetObject(ctx, s.bucket, key, minio.GetObjectOptions{})
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, "", err
 	}
 	stat, err := obj.Stat()
 	if err != nil {
 		_ = obj.Close()
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, "", err
 	}
 	return obj, stat.ContentType, nil
@@ -103,13 +121,26 @@ func (s *MinIOStorage) Download(ctx context.Context, key string) (io.ReadCloser,
 
 // Delete удаляет объект из bucket; для несуществующего ключа MinIO обычно не считает это ошибкой.
 func (s *MinIOStorage) Delete(ctx context.Context, key string) error {
-	return s.client.RemoveObject(ctx, s.bucket, key, minio.RemoveObjectOptions{})
+	ctx, span := observability.Tracer().Start(ctx, "s3.delete_object")
+	defer span.End()
+	span.SetAttributes(attribute.String("s3.key", key))
+	err := s.client.RemoveObject(ctx, s.bucket, key, minio.RemoveObjectOptions{})
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	}
+	return err
 }
 
 // PresignedGetURL создает временную ссылку на объект, чтобы ее можно было вернуть клиенту.
 func (s *MinIOStorage) PresignedGetURL(ctx context.Context, key string) (string, error) {
+	_, span := observability.Tracer().Start(ctx, "s3.presign_get_object")
+	defer span.End()
+	span.SetAttributes(attribute.String("s3.key", key))
 	u, err := s.presignClient.PresignedGetObject(ctx, s.bucket, key, 24*time.Hour, url.Values{})
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return "", err
 	}
 	return u.String(), nil

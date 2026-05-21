@@ -56,7 +56,7 @@ func TestWriteServiceErrorDoesNotExposeInternalDetails(t *testing.T) {
 	handler := &AvatarHandler{}
 	rec := httptest.NewRecorder()
 
-	handler.writeServiceError(rec, errors.New("database password leaked in error"))
+	handler.writeServiceError(context.Background(), rec, errors.New("database password leaked in error"))
 
 	require.Equal(t, http.StatusInternalServerError, rec.Code)
 	require.NotContains(t, rec.Body.String(), "database password")
@@ -323,7 +323,7 @@ func TestWriteServiceErrorMappings(t *testing.T) {
 			handler := &AvatarHandler{}
 			rec := httptest.NewRecorder()
 
-			handler.writeServiceError(rec, tt.err)
+			handler.writeServiceError(context.Background(), rec, tt.err)
 
 			require.Equal(t, tt.code, rec.Code)
 			require.Contains(t, rec.Body.String(), tt.body)

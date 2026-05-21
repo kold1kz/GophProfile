@@ -26,7 +26,8 @@ MAX_FILE_SIZE=2048
 `)
 	unsetConfigEnv(t)
 
-	cfg := Load()
+	cfg, err := LoadE()
+	require.NoError(t, err)
 
 	require.Equal(t, ":9090", cfg.HTTPAddr)
 	require.Equal(t, "https://cdn.example.test", cfg.PublicBaseURL)
@@ -48,7 +49,8 @@ func TestLoadDoesNotOverrideExistingEnvironment(t *testing.T) {
 	unsetConfigEnv(t)
 	t.Setenv("HTTP_ADDR", ":7070")
 
-	cfg := Load()
+	cfg, err := LoadE()
+	require.NoError(t, err)
 
 	require.Equal(t, ":7070", cfg.HTTPAddr)
 	require.Equal(t, "postgres://from-file", cfg.DatabaseURL)
@@ -59,7 +61,8 @@ func TestLoadFallsBackToDatabaseDSN(t *testing.T) {
 	writeDotEnv(t, requiredEnv()+"DATABASE_DSN=postgres://fallback\n")
 	unsetConfigEnv(t)
 
-	cfg := Load()
+	cfg, err := LoadE()
+	require.NoError(t, err)
 
 	require.Equal(t, "postgres://fallback", cfg.DatabaseURL)
 }

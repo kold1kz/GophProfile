@@ -1,0 +1,11 @@
+apiVersion: 1
+
+providers:
+  - name: GophProfile
+    orgId: 1
+    folder: GophProfile
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 10
+    options:
+      path: /var/lib/grafana/dashboards

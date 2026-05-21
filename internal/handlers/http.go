@@ -7,15 +7,18 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 
 	"gophprofile/internal/domain"
+	"gophprofile/internal/observability"
 	"gophprofile/internal/services"
 	"gophprofile/pkg/imaging"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 // AvatarHandler принимает HTTP-запросы и переводит их в вызовы AvatarService.
@@ -49,7 +52,9 @@ func NewAvatarHandler(service AvatarService, health HealthChecker, maxFileSize i
 // Routes строит HTTP-маршруты API и подключает готовый static frontend.
 func (h *AvatarHandler) Routes() http.Handler {
 	r := chi.NewRouter()
+	r.Use(observability.HTTPMiddleware)
 	r.Get("/health", h.healthCheck)
+	r.Handle("/metrics", promhttp.Handler())
 
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Post("/avatars", h.uploadAvatar)
@@ -68,7 +73,7 @@ func (h *AvatarHandler) Routes() http.Handler {
 	r.Post("/web/upload", h.webUpload)
 	r.Get("/web/gallery/{user_id}", h.webGallery)
 	r.Handle("/static/*", http.StripPrefix("/static/", http.FileServer(http.Dir("web/static"))))
-	return r
+	return otelhttp.NewHandler(r, "http.server")
 }
 
 func (h *AvatarHandler) uploadAvatar(w http.ResponseWriter, r *http.Request) {
@@ -79,7 +84,7 @@ func (h *AvatarHandler) uploadAvatar(w http.ResponseWriter, r *http.Request) {
 	}
 	avatar, err := h.parseAndUpload(w, r, userID)
 	if err != nil {
-		h.writeServiceError(w, err)
+		h.writeServiceError(r.Context(), w, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, avatarResponse(avatar))
@@ -88,31 +93,37 @@ func (h *AvatarHandler) uploadAvatar(w http.ResponseWriter, r *http.Request) {
 func (h *AvatarHandler) getAvatar(w http.ResponseWriter, r *http.Request) {
 	avatar, body, contentType, err := h.service.Get(r.Context(), chi.URLParam(r, "avatar_id"))
 	if err != nil {
-		h.writeServiceError(w, err)
+		h.writeServiceError(r.Context(), w, err)
 		return
 	}
 	defer body.Close()
 	if err := writeImage(w, r, avatar, body, contentType); err != nil {
-		log.Printf("write avatar image %s: %v", avatar.ID, err)
+		slog.LogAttrs(r.Context(), slog.LevelError, "write avatar image", append(observability.LogAttrs(r.Context()),
+			slog.String("avatar_id", avatar.ID),
+			slog.Any("error", err),
+		)...)
 	}
 }
 
 func (h *AvatarHandler) getUserAvatar(w http.ResponseWriter, r *http.Request) {
 	avatar, body, contentType, err := h.service.GetLatestForUser(r.Context(), chi.URLParam(r, "user_id"))
 	if err != nil {
-		h.writeServiceError(w, err)
+		h.writeServiceError(r.Context(), w, err)
 		return
 	}
 	defer body.Close()
 	if err := writeImage(w, r, avatar, body, contentType); err != nil {
-		log.Printf("write latest avatar image %s: %v", avatar.ID, err)
+		slog.LogAttrs(r.Context(), slog.LevelError, "write latest avatar image", append(observability.LogAttrs(r.Context()),
+			slog.String("avatar_id", avatar.ID),
+			slog.Any("error", err),
+		)...)
 	}
 }
 
 func (h *AvatarHandler) getMetadata(w http.ResponseWriter, r *http.Request) {
 	avatar, err := h.service.Metadata(r.Context(), chi.URLParam(r, "avatar_id"))
 	if err != nil {
-		h.writeServiceError(w, err)
+		h.writeServiceError(r.Context(), w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, avatar)
@@ -121,7 +132,7 @@ func (h *AvatarHandler) getMetadata(w http.ResponseWriter, r *http.Request) {
 func (h *AvatarHandler) listUserAvatars(w http.ResponseWriter, r *http.Request) {
 	avatars, err := h.service.List(r.Context(), chi.URLParam(r, "user_id"))
 	if err != nil {
-		h.writeServiceError(w, err)
+		h.writeServiceError(r.Context(), w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, avatars)
@@ -134,7 +145,7 @@ func (h *AvatarHandler) deleteAvatar(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.service.Delete(r.Context(), chi.URLParam(r, "avatar_id"), userID); err != nil {
-		h.writeServiceError(w, err)
+		h.writeServiceError(r.Context(), w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -155,11 +166,11 @@ func (h *AvatarHandler) deleteUserAvatar(w http.ResponseWriter, r *http.Request)
 	if avatarID != "" {
 		avatar, err := h.service.Metadata(r.Context(), avatarID)
 		if err != nil {
-			h.writeServiceError(w, err)
+			h.writeServiceError(r.Context(), w, err)
 			return
 		}
 		if err := h.service.Delete(r.Context(), avatar.ID, userID); err != nil {
-			h.writeServiceError(w, err)
+			h.writeServiceError(r.Context(), w, err)
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
@@ -167,11 +178,11 @@ func (h *AvatarHandler) deleteUserAvatar(w http.ResponseWriter, r *http.Request)
 	}
 	latest, err := h.service.LatestMetadata(r.Context(), userID)
 	if err != nil {
-		h.writeServiceError(w, err)
+		h.writeServiceError(r.Context(), w, err)
 		return
 	}
 	if err := h.service.Delete(r.Context(), latest.ID, userID); err != nil {
-		h.writeServiceError(w, err)
+		h.writeServiceError(r.Context(), w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -206,7 +217,7 @@ func (h *AvatarHandler) webUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	avatar, err := h.parseAndUpload(w, r, userID)
 	if err != nil {
-		h.writeServiceError(w, err)
+		h.writeServiceError(r.Context(), w, err)
 		return
 	}
 	http.Redirect(w, r, "/web/gallery/"+avatar.UserID, http.StatusFound)
@@ -237,7 +248,7 @@ func (h *AvatarHandler) parseAndUpload(w http.ResponseWriter, r *http.Request, u
 	})
 }
 
-func (h *AvatarHandler) writeServiceError(w http.ResponseWriter, err error) {
+func (h *AvatarHandler) writeServiceError(ctx context.Context, w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, services.ErrFileTooLarge):
 		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"error": "File too large", "max_size": h.maxFileSize})
@@ -248,7 +259,9 @@ func (h *AvatarHandler) writeServiceError(w http.ResponseWriter, err error) {
 	case errors.Is(err, domain.ErrNotFound):
 		writeError(w, http.StatusNotFound, "Avatar not found", "")
 	default:
-		log.Printf("internal handler error: %v", err)
+		slog.LogAttrs(ctx, slog.LevelError, "internal handler error", append(observability.LogAttrs(ctx),
+			slog.Any("error", err),
+		)...)
 		writeError(w, http.StatusInternalServerError, "Internal server error", "")
 	}
 }
