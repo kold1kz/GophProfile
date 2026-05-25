@@ -379,7 +379,8 @@ func (r *PostgresRepository) StorageUsageByUser(ctx context.Context) (map[string
 		SELECT user_id, COALESCE(SUM(size_bytes), 0)
 		FROM avatars
 		WHERE deleted_at IS NULL
-		GROUP BY user_id`)
+		GROUP BY user_id`,
+	)
 	if err != nil {
 		recordSpanError(span, err)
 		return nil, err

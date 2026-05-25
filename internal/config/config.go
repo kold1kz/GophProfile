@@ -60,6 +60,10 @@ func LoadE() (Config, error) {
 			return Config{}, fmt.Errorf("%s is required", item.key)
 		}
 	}
+	shutdownDelay, err := getenvDuration("SHUTDOWN_DELAY", 10*time.Second)
+	if err != nil {
+		return Config{}, err
+	}
 
 	return Config{
 		HTTPAddr:          getenv("HTTP_ADDR", ":8080"),
@@ -74,9 +78,9 @@ func LoadE() (Config, error) {
 		RabbitURL:         rabbitURL,
 		RabbitExchange:    getenv("RABBITMQ_EXCHANGE", "avatars.exchange"),
 		RabbitQueue:       getenv("RABBITMQ_QUEUE", "avatars.worker"),
-		OTLPEndpoint:      getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "otel-collector:4317"),
+		OTLPEndpoint:      getenv("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
 		MaxFileSize:       getenvInt64("MAX_FILE_SIZE", 10<<20),
-		ShutdownDelay:     10 * time.Second,
+		ShutdownDelay:     shutdownDelay,
 	}, nil
 }
 
@@ -133,15 +137,15 @@ func parseDotEnvLine(line string) (string, string, bool) {
 }
 
 func getenv(key, fallback string) string {
-	if value := os.Getenv(key); value != "" {
+	if value, ok := os.LookupEnv(key); ok {
 		return value
 	}
 	return fallback
 }
 
 func getenvBool(key string, fallback bool) bool {
-	value := os.Getenv(key)
-	if value == "" {
+	value, ok := os.LookupEnv(key)
+	if !ok || value == "" {
 		return fallback
 	}
 	parsed, err := strconv.ParseBool(value)
@@ -152,8 +156,8 @@ func getenvBool(key string, fallback bool) bool {
 }
 
 func getenvInt64(key string, fallback int64) int64 {
-	value := os.Getenv(key)
-	if value == "" {
+	value, ok := os.LookupEnv(key)
+	if !ok || value == "" {
 		return fallback
 	}
 	parsed, err := strconv.ParseInt(value, 10, 64)
@@ -161,4 +165,16 @@ func getenvInt64(key string, fallback int64) int64 {
 		return fallback
 	}
 	return parsed
+}
+
+func getenvDuration(key string, fallback time.Duration) (time.Duration, error) {
+	value, ok := os.LookupEnv(key)
+	if !ok || value == "" {
+		return fallback, nil
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be a valid duration: %w", key, err)
+	}
+	return parsed, nil
 }

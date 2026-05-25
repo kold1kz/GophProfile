@@ -44,7 +44,7 @@ var (
 	uploadsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "avatars_uploads_total",
 		Help: "Total number of avatar uploads.",
-	}, []string{"status", "user_id"})
+	}, []string{"status"})
 	uploadDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "avatars_upload_duration_seconds",
 		Help:    "Avatar upload duration in seconds.",
@@ -172,8 +172,8 @@ func (r *statusRecorder) WriteHeader(status int) {
 	r.ResponseWriter.WriteHeader(status)
 }
 
-func ObserveUpload(userID, status string, duration time.Duration) {
-	uploadsTotal.WithLabelValues(status, userID).Inc()
+func ObserveUpload(status string, duration time.Duration) {
+	uploadsTotal.WithLabelValues(status).Inc()
 	uploadDuration.WithLabelValues(status).Observe(duration.Seconds())
 }
 

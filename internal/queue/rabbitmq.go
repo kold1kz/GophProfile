@@ -32,6 +32,7 @@ const (
 type RabbitMQ struct {
 	mu         sync.RWMutex
 	publishMu  sync.Mutex
+	closeOnce  sync.Once
 	url        string
 	conn       *amqp.Connection
 	publishCh  *amqp.Channel
@@ -43,6 +44,7 @@ type RabbitMQ struct {
 	queue      string
 	dlx        string
 	deadLetter string
+	done       chan struct{}
 }
 
 // NewRabbitMQ подключается к RabbitMQ и объявляет все сущности, нужные для надежной доставки.
@@ -53,6 +55,7 @@ func NewRabbitMQ(url, exchange, queue string) (*RabbitMQ, error) {
 		queue:      queue,
 		dlx:        exchange + ".dlx",
 		deadLetter: queue + ".dlq",
+		done:       make(chan struct{}),
 	}
 	if err := r.connect(); err != nil {
 		return nil, err
@@ -187,6 +190,10 @@ func (r *RabbitMQ) QueueDepth() (int, error) {
 
 // Close закрывает каналы и соединение с RabbitMQ.
 func (r *RabbitMQ) Close() error {
+	if r.done != nil {
+		r.closeOnce.Do(func() { close(r.done) })
+	}
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.publishCh != nil {
@@ -288,9 +295,16 @@ func (r *RabbitMQ) reconnectOnClose() {
 	for {
 		r.mu.RLock()
 		closeCh := r.closeCh
+		done := r.done
 		r.mu.RUnlock()
 
-		err, ok := <-closeCh
+		var err *amqp.Error
+		var ok bool
+		select {
+		case <-done:
+			return
+		case err, ok = <-closeCh:
+		}
 		if !ok {
 			return
 		}
@@ -304,7 +318,13 @@ func (r *RabbitMQ) reconnectOnClose() {
 				slog.Info("rabbitmq connection restored")
 				break
 			}
-			time.Sleep(delay)
+			timer := time.NewTimer(delay)
+			select {
+			case <-done:
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
 			delay *= 2
 			if delay > 30*time.Second {
 				delay = 30 * time.Second

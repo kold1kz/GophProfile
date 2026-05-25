@@ -60,12 +60,12 @@ func (s *AvatarService) Upload(ctx context.Context, in UploadInput) (domain.Avat
 	)
 	status := "error"
 	defer func() {
-		observability.ObserveUpload(in.UserID, status, time.Since(start))
+		observability.ObserveUpload(status, time.Since(start))
 	}()
 
 	if strings.TrimSpace(in.UserID) == "" {
 		span.SetStatus(codes.Error, "user id is required")
-		return domain.Avatar{}, fmt.Errorf("user id is required")
+		return domain.Avatar{}, errors.New("user id is required")
 	}
 	if in.Size > s.maxFileSize {
 		span.SetStatus(codes.Error, ErrFileTooLarge.Error())

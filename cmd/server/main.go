@@ -100,15 +100,20 @@ func main() {
 		Handler: handler.Routes(),
 	}
 
+	errCh := make(chan error, 1)
 	go func() {
 		logger.Info("server listening", "addr", cfg.HTTPAddr)
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			logger.Error("listen", "error", err)
-			os.Exit(1)
+			errCh <- err
 		}
 	}()
 
-	<-ctx.Done()
+	select {
+	case <-ctx.Done():
+	case err := <-errCh:
+		logger.Error("listen", "error", err)
+		stop()
+	}
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownDelay)
 	defer cancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {
