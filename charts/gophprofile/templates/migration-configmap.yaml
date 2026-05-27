@@ -1,0 +1,15 @@
+{{- if .Values.migrations.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "gophprofile.fullname" . }}-migrations
+  labels:
+    {{- include "gophprofile.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": {{ ternary "post-install,pre-upgrade" "pre-install,pre-upgrade" .Values.localInfrastructure.enabled | quote }}
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation
+data:
+  000001_create_avatars.up.sql: |-
+{{ .Files.Get "files/migrations/000001_create_avatars.up.sql" | indent 4 }}
+{{- end }}

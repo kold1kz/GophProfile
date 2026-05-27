@@ -14,6 +14,7 @@ import (
 	"gophprofile/internal/config"
 	"gophprofile/internal/observability"
 	"gophprofile/internal/repository"
+	"gophprofile/internal/resilience"
 	"gophprofile/internal/storage"
 	avatarworker "gophprofile/internal/worker"
 
@@ -76,7 +77,7 @@ func main() {
 	}
 	defer broker.Close()
 
-	w := avatarworker.New(repository.NewPostgres(db), s3, broker)
+	w := avatarworker.New(resilience.NewRepository(repository.NewPostgres(db)), resilience.NewObjectStorage(s3), broker)
 	metricsServer := startMetricsServer(cfg.WorkerMetricsAddr, logger)
 	defer func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
