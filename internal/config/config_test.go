@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -23,10 +24,12 @@ RABBITMQ_URL=amqp://user:pass@rabbit:5672/
 RABBITMQ_EXCHANGE=profile.exchange
 RABBITMQ_QUEUE=profile.worker
 MAX_FILE_SIZE=2048
+SHUTDOWN_DELAY=3s
 `)
 	unsetConfigEnv(t)
 
-	cfg := Load()
+	cfg, err := LoadE()
+	require.NoError(t, err)
 
 	require.Equal(t, ":9090", cfg.HTTPAddr)
 	require.Equal(t, "https://cdn.example.test", cfg.PublicBaseURL)
@@ -40,6 +43,7 @@ MAX_FILE_SIZE=2048
 	require.Equal(t, "profile.exchange", cfg.RabbitExchange)
 	require.Equal(t, "profile.worker", cfg.RabbitQueue)
 	require.EqualValues(t, 2048, cfg.MaxFileSize)
+	require.Equal(t, 3*time.Second, cfg.ShutdownDelay)
 }
 
 func TestLoadDoesNotOverrideExistingEnvironment(t *testing.T) {
@@ -48,7 +52,8 @@ func TestLoadDoesNotOverrideExistingEnvironment(t *testing.T) {
 	unsetConfigEnv(t)
 	t.Setenv("HTTP_ADDR", ":7070")
 
-	cfg := Load()
+	cfg, err := LoadE()
+	require.NoError(t, err)
 
 	require.Equal(t, ":7070", cfg.HTTPAddr)
 	require.Equal(t, "postgres://from-file", cfg.DatabaseURL)
@@ -59,9 +64,33 @@ func TestLoadFallsBackToDatabaseDSN(t *testing.T) {
 	writeDotEnv(t, requiredEnv()+"DATABASE_DSN=postgres://fallback\n")
 	unsetConfigEnv(t)
 
-	cfg := Load()
+	cfg, err := LoadE()
+	require.NoError(t, err)
 
 	require.Equal(t, "postgres://fallback", cfg.DatabaseURL)
+}
+
+func TestLoadAllowsEmptyOTLPEndpoint(t *testing.T) {
+	chdir(t, t.TempDir())
+	writeDotEnv(t, requiredEnv()+"DATABASE_URL=postgres://db\n")
+	unsetConfigEnv(t)
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+
+	cfg, err := LoadE()
+	require.NoError(t, err)
+
+	require.Empty(t, cfg.OTLPEndpoint)
+}
+
+func TestLoadReturnsErrorForInvalidShutdownDelay(t *testing.T) {
+	chdir(t, t.TempDir())
+	writeDotEnv(t, requiredEnv()+"DATABASE_URL=postgres://db\nSHUTDOWN_DELAY=soon\n")
+	unsetConfigEnv(t)
+
+	_, err := LoadE()
+
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "SHUTDOWN_DELAY")
 }
 
 func TestLoadEReturnsErrorWhenRequiredSecretMissing(t *testing.T) {
@@ -142,7 +171,9 @@ func unsetConfigEnv(t *testing.T) {
 		"RABBITMQ_URL",
 		"RABBITMQ_EXCHANGE",
 		"RABBITMQ_QUEUE",
+		"OTEL_EXPORTER_OTLP_ENDPOINT",
 		"MAX_FILE_SIZE",
+		"SHUTDOWN_DELAY",
 	} {
 		t.Setenv(key, "")
 		require.NoError(t, os.Unsetenv(key))

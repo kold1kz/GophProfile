@@ -1,0 +1,47 @@
+groups:
+  - name: avatar-service
+    rules:
+      - alert: HighUploadErrorRate
+        expr: sum(rate(avatars_uploads_total{status="error"}[5m])) / sum(rate(avatars_uploads_total[5m])) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: High avatar upload error rate
+          description: More than 10% of avatar uploads are failing.
+
+      - alert: HighUploadResponseTime
+        expr: histogram_quantile(0.95, sum(rate(avatars_upload_duration_seconds_bucket[5m])) by (le)) > 5
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: High avatar upload latency
+          description: p95 avatar upload duration is higher than 5 seconds.
+
+      - alert: HighHTTPErrorRate
+        expr: sum(rate(gophprofile_http_errors_total[5m])) / sum(rate(gophprofile_http_requests_total[5m])) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: High HTTP error rate
+          description: More than 5% of HTTP requests return 5xx.
+
+      - alert: InstanceDown
+        expr: up{job="gophprofile-server"} == 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: GophProfile server is down
+          description: Prometheus cannot scrape the GophProfile server metrics endpoint.
+
+      - alert: HighQueueDepth
+        expr: gophprofile_queue_depth > 100
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Avatar worker queue is growing
+          description: More than 100 messages are waiting in the avatar worker queue.

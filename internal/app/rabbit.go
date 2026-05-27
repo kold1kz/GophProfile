@@ -2,7 +2,7 @@ package app
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"time"
 
 	"gophprofile/internal/queue"
@@ -20,7 +20,7 @@ func ConnectRabbit(ctx context.Context, url, exchange, queueName string) (*queue
 			return broker, nil
 		}
 		lastErr = err
-		log.Printf("connect rabbitmq attempt %d failed: %v", attempt, err)
+		slog.Warn("connect rabbitmq failed", "attempt", attempt, "error", err)
 
 		timer := time.NewTimer(delay)
 		select {

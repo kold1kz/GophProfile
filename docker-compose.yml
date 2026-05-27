@@ -66,6 +66,7 @@ services:
       S3_SECRET_KEY: adminadmin
       S3_BUCKET: avatars
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
     ports:
       - "8080:8080"
     networks:
@@ -77,12 +78,15 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
+      otel-collector:
+        condition: service_started
 
   worker:
     container_name: worker
     build: .
     command: ["/app/worker"]
     environment:
+      WORKER_METRICS_ADDR: ":8081"
       DATABASE_URL: postgres://root:root@postgres16:5432/gophprofile
       PUBLIC_BASE_URL: http://localhost:9000
       S3_ENDPOINT: minio:9000
@@ -90,8 +94,11 @@ services:
       S3_SECRET_KEY: adminadmin
       S3_BUCKET: avatars
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
     networks:
       - gophprofile_network
+    ports:
+      - "8081:8081"
     depends_on:
       postgres:
         condition: service_healthy
@@ -99,6 +106,108 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
+      otel-collector:
+        condition: service_started
+
+  prometheus:
+    container_name: prometheus
+    image: prom/prometheus:v2.52.0
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--web.enable-lifecycle"
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./docker/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+    networks:
+      - gophprofile_network
+    depends_on:
+      - server
+      - alertmanager
+
+  alertmanager:
+    container_name: alertmanager
+    image: prom/alertmanager:v0.27.0
+    command:
+      - "--config.file=/etc/alertmanager/alertmanager.yml"
+      - "--storage.path=/alertmanager"
+    ports:
+      - "9093:9093"
+    volumes:
+      - ./docker/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanagerdata:/alertmanager
+    networks:
+      - gophprofile_network
+    depends_on:
+      - alertmanager-webhook
+
+  alertmanager-webhook:
+    container_name: alertmanager-webhook
+    image: mendhak/http-https-echo:34
+    environment:
+      HTTP_PORT: "8080"
+    ports:
+      - "18080:8080"
+    networks:
+      - gophprofile_network
+
+  jaeger:
+    container_name: jaeger
+    image: jaegertracing/all-in-one:1.56
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"
+    networks:
+      - gophprofile_network
+
+  otel-collector:
+    container_name: otel-collector
+    image: otel/opentelemetry-collector-contrib:0.97.0
+    command: ["--config=/etc/otel-collector-config.yml"]
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+      - "13133:13133"
+    volumes:
+      - ./docker/otel-collector/otel-collector.yml:/etc/otel-collector-config.yml:ro
+    networks:
+      - gophprofile_network
+    depends_on:
+      - jaeger
+      - loki
+
+  loki:
+    container_name: loki
+    image: grafana/loki:3.6.3
+    command: ["-config.file=/etc/loki/local-config.yaml"]
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./docker/loki/loki.yml:/etc/loki/local-config.yaml:ro
+      - lokidata:/loki
+    networks:
+      - gophprofile_network
+
+  grafana:
+    container_name: grafana
+    image: grafana/grafana:10.4.2
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./docker/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafanadata:/var/lib/grafana
+    networks:
+      - gophprofile_network
+    depends_on:
+      - prometheus
+      - jaeger
+      - loki
 
 networks:
   gophprofile_network:
@@ -107,3 +216,6 @@ networks:
 volumes:
   pgdata:
   miniodata:
+  grafanadata:
+  lokidata:
+  alertmanagerdata:

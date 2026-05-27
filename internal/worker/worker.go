@@ -8,11 +8,15 @@ import (
 	"time"
 
 	"gophprofile/internal/domain"
+	"gophprofile/internal/observability"
 	"gophprofile/internal/queue"
 	"gophprofile/internal/services"
 	"gophprofile/pkg/imaging"
 
 	amqp "github.com/rabbitmq/amqp091-go"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 )
 
 // Worker читает события из RabbitMQ и выполняет тяжелую фоновую работу с файлами.
@@ -75,6 +79,11 @@ func (w *Worker) consume(ctx context.Context, deliveries <-chan amqp.Delivery) e
 }
 
 func (w *Worker) handleDelivery(ctx context.Context, delivery amqp.Delivery) {
+	ctx = otel.GetTextMapPropagator().Extract(ctx, queueHeadersCarrier(delivery.Headers))
+	ctx, span := observability.Tracer().Start(ctx, "worker.handle_delivery")
+	defer span.End()
+	span.SetAttributes(attribute.String("routing_key", delivery.RoutingKey), attribute.String("message_id", delivery.MessageId))
+	status := "error"
 	err := retry(ctx, 3, func() error {
 		switch delivery.RoutingKey {
 		case queue.RoutingAvatarUploaded:
@@ -94,14 +103,22 @@ func (w *Worker) handleDelivery(ctx context.Context, delivery amqp.Delivery) {
 		}
 	})
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		observability.ObserveWorkerEvent(delivery.RoutingKey, status)
 		_ = delivery.Nack(false, false)
 		return
 	}
+	status = "success"
+	observability.ObserveWorkerEvent(delivery.RoutingKey, status)
 	_ = delivery.Ack(false)
 }
 
 // HandleUploadEvent обрабатывает загрузку: делает миниатюры, сохраняет их и обновляет статус аватара.
 func (w *Worker) HandleUploadEvent(ctx context.Context, event domain.AvatarUploadEvent) error {
+	ctx, span := observability.Tracer().Start(ctx, "worker.handle_upload_event")
+	defer span.End()
+	span.SetAttributes(attribute.String("avatar_id", event.AvatarID), attribute.String("user_id", event.UserID), attribute.String("message_id", event.MessageID))
 	if event.MessageID != "" {
 		processed, err := w.repo.ProcessedMessage(ctx, event.MessageID)
 		if err != nil {
@@ -184,6 +201,9 @@ func (w *Worker) HandleUploadEvent(ctx context.Context, event domain.AvatarUploa
 
 // HandleDeleteEvent удаляет из S3 все файлы, связанные с аватаром.
 func (w *Worker) HandleDeleteEvent(ctx context.Context, event domain.AvatarDeleteEvent) error {
+	ctx, span := observability.Tracer().Start(ctx, "worker.handle_delete_event")
+	defer span.End()
+	span.SetAttributes(attribute.String("avatar_id", event.AvatarID), attribute.String("message_id", event.MessageID), attribute.Int("s3_keys", len(event.S3Keys)))
 	if event.MessageID != "" {
 		processed, err := w.repo.ProcessedMessage(ctx, event.MessageID)
 		if err != nil {
@@ -205,6 +225,35 @@ func (w *Worker) HandleDeleteEvent(ctx context.Context, event domain.AvatarDelet
 		return w.repo.SaveProcessedMessage(ctx, event.MessageID)
 	}
 	return nil
+}
+
+type queueHeadersCarrier amqp.Table
+
+func (c queueHeadersCarrier) Get(key string) string {
+	value, ok := c[key]
+	if !ok {
+		return ""
+	}
+	switch typed := value.(type) {
+	case string:
+		return typed
+	case []byte:
+		return string(typed)
+	default:
+		return fmt.Sprint(typed)
+	}
+}
+
+func (c queueHeadersCarrier) Set(key, value string) {
+	c[key] = value
+}
+
+func (c queueHeadersCarrier) Keys() []string {
+	keys := make([]string, 0, len(c))
+	for key := range c {
+		keys = append(keys, key)
+	}
+	return keys
 }
 
 func retry(ctx context.Context, attempts int, fn func() error) error {

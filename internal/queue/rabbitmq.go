@@ -5,13 +5,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"sync"
 	"time"
 
 	"gophprofile/internal/domain"
+	"gophprofile/internal/observability"
 
 	amqp "github.com/rabbitmq/amqp091-go"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 )
 
 const (
@@ -28,6 +32,7 @@ const (
 type RabbitMQ struct {
 	mu         sync.RWMutex
 	publishMu  sync.Mutex
+	closeOnce  sync.Once
 	url        string
 	conn       *amqp.Connection
 	publishCh  *amqp.Channel
@@ -39,6 +44,7 @@ type RabbitMQ struct {
 	queue      string
 	dlx        string
 	deadLetter string
+	done       chan struct{}
 }
 
 // NewRabbitMQ подключается к RabbitMQ и объявляет все сущности, нужные для надежной доставки.
@@ -49,6 +55,7 @@ func NewRabbitMQ(url, exchange, queue string) (*RabbitMQ, error) {
 		queue:      queue,
 		dlx:        exchange + ".dlx",
 		deadLetter: queue + ".dlq",
+		done:       make(chan struct{}),
 	}
 	if err := r.connect(); err != nil {
 		return nil, err
@@ -169,8 +176,24 @@ func (r *RabbitMQ) Ping(ctx context.Context) error {
 	return ch.ExchangeDeclarePassive(r.exchange, "topic", true, false, false, false, nil)
 }
 
+// QueueDepth returns the current number of ready messages in the worker queue.
+func (r *RabbitMQ) QueueDepth() (int, error) {
+	r.mu.RLock()
+	ch := r.consumeCh
+	r.mu.RUnlock()
+	queue, err := ch.QueueInspect(r.queue)
+	if err != nil {
+		return 0, err
+	}
+	return queue.Messages, nil
+}
+
 // Close закрывает каналы и соединение с RabbitMQ.
 func (r *RabbitMQ) Close() error {
+	if r.done != nil {
+		r.closeOnce.Do(func() { close(r.done) })
+	}
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.publishCh != nil {
@@ -186,6 +209,9 @@ func (r *RabbitMQ) Close() error {
 }
 
 func (r *RabbitMQ) publish(ctx context.Context, routingKey, messageID string, payload any) error {
+	ctx, span := observability.Tracer().Start(ctx, "rabbitmq.publish")
+	defer span.End()
+	span.SetAttributes(attribute.String("routing_key", routingKey), attribute.String("message_id", messageID))
 	r.publishMu.Lock()
 	defer r.publishMu.Unlock()
 
@@ -203,50 +229,102 @@ func (r *RabbitMQ) publish(ctx context.Context, routingKey, messageID string, pa
 	returns := r.returns
 	r.mu.RUnlock()
 
+	headers := amqp.Table{}
+	otel.GetTextMapPropagator().Inject(ctx, amqpHeadersCarrier(headers))
+
 	if err := ch.PublishWithContext(ctx, r.exchange, routingKey, true, false, amqp.Publishing{
 		ContentType:  "application/json",
 		DeliveryMode: amqp.Persistent,
 		MessageId:    messageID,
 		Timestamp:    time.Now().UTC(),
+		Headers:      headers,
 		Body:         body,
 	}); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return err
 	}
 
 	select {
 	case ret := <-returns:
+		span.SetStatus(codes.Error, ret.ReplyText)
 		return fmt.Errorf("rabbitmq returned message %q: %s", ret.RoutingKey, ret.ReplyText)
 	case confirmation := <-confirms:
 		if confirmation.Ack {
 			return nil
 		}
+		span.SetStatus(codes.Error, "rabbitmq rejected publish")
 		return errors.New("rabbitmq rejected publish")
 	case <-ctx.Done():
+		span.RecordError(ctx.Err())
+		span.SetStatus(codes.Error, ctx.Err().Error())
 		return fmt.Errorf("rabbitmq publish confirm timeout: %w", ctx.Err())
 	}
+}
+
+type amqpHeadersCarrier amqp.Table
+
+func (c amqpHeadersCarrier) Get(key string) string {
+	value, ok := c[key]
+	if !ok {
+		return ""
+	}
+	switch typed := value.(type) {
+	case string:
+		return typed
+	case []byte:
+		return string(typed)
+	default:
+		return fmt.Sprint(typed)
+	}
+}
+
+func (c amqpHeadersCarrier) Set(key, value string) {
+	c[key] = value
+}
+
+func (c amqpHeadersCarrier) Keys() []string {
+	keys := make([]string, 0, len(c))
+	for key := range c {
+		keys = append(keys, key)
+	}
+	return keys
 }
 
 func (r *RabbitMQ) reconnectOnClose() {
 	for {
 		r.mu.RLock()
 		closeCh := r.closeCh
+		done := r.done
 		r.mu.RUnlock()
 
-		err, ok := <-closeCh
+		var err *amqp.Error
+		var ok bool
+		select {
+		case <-done:
+			return
+		case err, ok = <-closeCh:
+		}
 		if !ok {
 			return
 		}
 		if err != nil {
-			log.Printf("rabbitmq connection closed: %v", err)
+			slog.Warn("rabbitmq connection closed", "error", err)
 		}
 
 		delay := time.Second
 		for {
 			if err := r.connect(); err == nil {
-				log.Printf("rabbitmq connection restored")
+				slog.Info("rabbitmq connection restored")
 				break
 			}
-			time.Sleep(delay)
+			timer := time.NewTimer(delay)
+			select {
+			case <-done:
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
 			delay *= 2
 			if delay > 30*time.Second {
 				delay = 30 * time.Second

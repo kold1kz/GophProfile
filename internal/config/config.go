@@ -12,7 +12,8 @@ import (
 // Config хранит все настройки, которые нужны серверу и воркеру для старта.
 // Значения приходят из .env, переменных окружения или из дефолтов ниже.
 type Config struct {
-	HTTPAddr string
+	HTTPAddr          string
+	WorkerMetricsAddr string
 	// PublicBaseURL задает внешний адрес MinIO для presigned URL, например http://localhost:9000.
 	PublicBaseURL  string
 	DatabaseURL    string
@@ -24,18 +25,9 @@ type Config struct {
 	RabbitURL      string
 	RabbitExchange string
 	RabbitQueue    string
+	OTLPEndpoint   string
 	MaxFileSize    int64
 	ShutdownDelay  time.Duration
-}
-
-// Load собирает конфигурацию приложения из .env и окружения.
-// DATABASE_URL имеет приоритет, а DATABASE_DSN используется как запасное имя для строки подключения.
-func Load() Config {
-	cfg, err := LoadE()
-	if err != nil {
-		panic(err)
-	}
-	return cfg
 }
 
 // LoadE собирает конфигурацию приложения и возвращает ошибку, если не хватает обязательных секретов.
@@ -54,31 +46,41 @@ func LoadE() (Config, error) {
 	s3AccessKey := getenv("S3_ACCESS_KEY", "")
 	s3SecretKey := getenv("S3_SECRET_KEY", "")
 	rabbitURL := getenv("RABBITMQ_URL", "")
-	for key, value := range map[string]string{
-		"S3_ENDPOINT":   s3Endpoint,
-		"S3_ACCESS_KEY": s3AccessKey,
-		"S3_SECRET_KEY": s3SecretKey,
-		"RABBITMQ_URL":  rabbitURL,
-	} {
-		if value == "" {
-			return Config{}, fmt.Errorf("%s is required", key)
+	required := []struct {
+		key   string
+		value string
+	}{
+		{"S3_ENDPOINT", s3Endpoint},
+		{"S3_ACCESS_KEY", s3AccessKey},
+		{"S3_SECRET_KEY", s3SecretKey},
+		{"RABBITMQ_URL", rabbitURL},
+	}
+	for _, item := range required {
+		if item.value == "" {
+			return Config{}, fmt.Errorf("%s is required", item.key)
 		}
+	}
+	shutdownDelay, err := getenvDuration("SHUTDOWN_DELAY", 10*time.Second)
+	if err != nil {
+		return Config{}, err
 	}
 
 	return Config{
-		HTTPAddr:       getenv("HTTP_ADDR", ":8080"),
-		PublicBaseURL:  getenv("PUBLIC_BASE_URL", ""),
-		DatabaseURL:    databaseURL,
-		S3Endpoint:     s3Endpoint,
-		S3AccessKey:    s3AccessKey,
-		S3SecretKey:    s3SecretKey,
-		S3Bucket:       getenv("S3_BUCKET", "avatars"),
-		S3UseSSL:       getenvBool("S3_USE_SSL", false),
-		RabbitURL:      rabbitURL,
-		RabbitExchange: getenv("RABBITMQ_EXCHANGE", "avatars.exchange"),
-		RabbitQueue:    getenv("RABBITMQ_QUEUE", "avatars.worker"),
-		MaxFileSize:    getenvInt64("MAX_FILE_SIZE", 10<<20),
-		ShutdownDelay:  10 * time.Second,
+		HTTPAddr:          getenv("HTTP_ADDR", ":8080"),
+		WorkerMetricsAddr: getenv("WORKER_METRICS_ADDR", ":8081"),
+		PublicBaseURL:     getenv("PUBLIC_BASE_URL", ""),
+		DatabaseURL:       databaseURL,
+		S3Endpoint:        s3Endpoint,
+		S3AccessKey:       s3AccessKey,
+		S3SecretKey:       s3SecretKey,
+		S3Bucket:          getenv("S3_BUCKET", "avatars"),
+		S3UseSSL:          getenvBool("S3_USE_SSL", false),
+		RabbitURL:         rabbitURL,
+		RabbitExchange:    getenv("RABBITMQ_EXCHANGE", "avatars.exchange"),
+		RabbitQueue:       getenv("RABBITMQ_QUEUE", "avatars.worker"),
+		OTLPEndpoint:      getenv("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
+		MaxFileSize:       getenvInt64("MAX_FILE_SIZE", 10<<20),
+		ShutdownDelay:     shutdownDelay,
 	}, nil
 }
 
@@ -135,15 +137,15 @@ func parseDotEnvLine(line string) (string, string, bool) {
 }
 
 func getenv(key, fallback string) string {
-	if value := os.Getenv(key); value != "" {
+	if value, ok := os.LookupEnv(key); ok {
 		return value
 	}
 	return fallback
 }
 
 func getenvBool(key string, fallback bool) bool {
-	value := os.Getenv(key)
-	if value == "" {
+	value, ok := os.LookupEnv(key)
+	if !ok || value == "" {
 		return fallback
 	}
 	parsed, err := strconv.ParseBool(value)
@@ -154,8 +156,8 @@ func getenvBool(key string, fallback bool) bool {
 }
 
 func getenvInt64(key string, fallback int64) int64 {
-	value := os.Getenv(key)
-	if value == "" {
+	value, ok := os.LookupEnv(key)
+	if !ok || value == "" {
 		return fallback
 	}
 	parsed, err := strconv.ParseInt(value, 10, 64)
@@ -163,4 +165,16 @@ func getenvInt64(key string, fallback int64) int64 {
 		return fallback
 	}
 	return parsed
+}
+
+func getenvDuration(key string, fallback time.Duration) (time.Duration, error) {
+	value, ok := os.LookupEnv(key)
+	if !ok || value == "" {
+		return fallback, nil
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be a valid duration: %w", key, err)
+	}
+	return parsed, nil
 }

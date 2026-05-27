@@ -13,9 +13,17 @@ docker compose up --build
 - API: `http://localhost:8080/api/v1`
 - Web upload: `http://localhost:8080/web/upload`
 - Health: `http://localhost:8080/health`
+- Metrics: `http://localhost:8080/metrics`
+- OpenTelemetry Collector health: `http://localhost:13133`
 - PostgreSQL: `localhost:15432`
 - RabbitMQ UI: `http://localhost:15672` (`guest` / `guest`)
 - MinIO UI: `http://localhost:9001` (`admin` / `adminadmin`)
+- Prometheus: `http://localhost:9090`
+- Jaeger: `http://localhost:16686`
+- Grafana: `http://localhost:3000` (`admin` / `admin`)
+- Loki: `http://localhost:3100`
+
+Трейсы и структурированные `slog`-логи отправляются из `server` и `worker` по OTLP/gRPC в OpenTelemetry Collector (`otel-collector:4317`). Collector экспортирует трейсы в Jaeger, а логи в Loki.
 
 ## Основные эндпоинты
 
