@@ -7,6 +7,7 @@ import (
 
 	"gophprofile/internal/domain"
 	"gophprofile/internal/observability"
+	"gophprofile/pkg/circuitbreaker"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -17,12 +18,18 @@ import (
 
 // PostgresRepository хранит и читает метаданные аватаров в PostgreSQL.
 type PostgresRepository struct {
-	pool *pgxpool.Pool
+	pool    *pgxpool.Pool
+	breaker *circuitbreaker.CircuitBreaker
 }
 
 // NewPostgres оборачивает готовый pgx pool в репозиторий приложения.
 func NewPostgres(pool *pgxpool.Pool) *PostgresRepository {
-	return &PostgresRepository{pool: pool}
+	return &PostgresRepository{
+		pool: pool,
+		breaker: circuitbreaker.New("postgres", circuitbreaker.WithIgnoredErrors(func(err error) bool {
+			return errors.Is(err, domain.ErrNotFound) || errors.Is(err, domain.ErrForbidden)
+		})),
+	}
 }
 
 // Connect создает пул подключений к PostgreSQL и сразу проверяет, что база отвечает.
@@ -40,6 +47,12 @@ func Connect(ctx context.Context, dsn string) (*pgxpool.Pool, error) {
 
 // CreateWithUploadEvent сохраняет новый аватар и outbox-событие в одной транзакции.
 func (r *PostgresRepository) CreateWithUploadEvent(ctx context.Context, avatar domain.Avatar, event domain.AvatarUploadEvent) (domain.Avatar, error) {
+	return circuitbreaker.Execute(r.breaker, func() (domain.Avatar, error) {
+		return r.createWithUploadEvent(ctx, avatar, event)
+	})
+}
+
+func (r *PostgresRepository) createWithUploadEvent(ctx context.Context, avatar domain.Avatar, event domain.AvatarUploadEvent) (domain.Avatar, error) {
 	ctx, span := observability.Tracer().Start(ctx, "db.create_avatar_with_upload_event")
 	defer span.End()
 	span.SetAttributes(attribute.String("avatar_id", avatar.ID), attribute.String("user_id", avatar.UserID))
@@ -97,6 +110,12 @@ func (r *PostgresRepository) CreateWithUploadEvent(ctx context.Context, avatar d
 
 // GetByID ищет не удаленный аватар по идентификатору.
 func (r *PostgresRepository) GetByID(ctx context.Context, id string) (domain.Avatar, error) {
+	return circuitbreaker.Execute(r.breaker, func() (domain.Avatar, error) {
+		return r.getByID(ctx, id)
+	})
+}
+
+func (r *PostgresRepository) getByID(ctx context.Context, id string) (domain.Avatar, error) {
 	ctx, span := observability.Tracer().Start(ctx, "db.get_avatar_by_id")
 	defer span.End()
 	span.SetAttributes(attribute.String("avatar_id", id))
@@ -113,6 +132,12 @@ func (r *PostgresRepository) GetByID(ctx context.Context, id string) (domain.Ava
 
 // GetLatestByUserID возвращает последний не удаленный аватар конкретного пользователя.
 func (r *PostgresRepository) GetLatestByUserID(ctx context.Context, userID string) (domain.Avatar, error) {
+	return circuitbreaker.Execute(r.breaker, func() (domain.Avatar, error) {
+		return r.getLatestByUserID(ctx, userID)
+	})
+}
+
+func (r *PostgresRepository) getLatestByUserID(ctx context.Context, userID string) (domain.Avatar, error) {
 	ctx, span := observability.Tracer().Start(ctx, "db.get_latest_avatar_by_user_id")
 	defer span.End()
 	span.SetAttributes(attribute.String("user_id", userID))
@@ -131,6 +156,12 @@ func (r *PostgresRepository) GetLatestByUserID(ctx context.Context, userID strin
 
 // ListByUserID возвращает историю не удаленных аватаров пользователя.
 func (r *PostgresRepository) ListByUserID(ctx context.Context, userID string) ([]domain.Avatar, error) {
+	return circuitbreaker.Execute(r.breaker, func() ([]domain.Avatar, error) {
+		return r.listByUserID(ctx, userID)
+	})
+}
+
+func (r *PostgresRepository) listByUserID(ctx context.Context, userID string) ([]domain.Avatar, error) {
 	ctx, span := observability.Tracer().Start(ctx, "db.list_avatars_by_user_id")
 	defer span.End()
 	span.SetAttributes(attribute.String("user_id", userID))
@@ -165,16 +196,33 @@ func (r *PostgresRepository) ListByUserID(ctx context.Context, userID string) ([
 
 // SoftDelete помечает аватар удаленным, но оставляет запись в базе для истории и аудита.
 func (r *PostgresRepository) SoftDelete(ctx context.Context, id, userID string) (domain.Avatar, error) {
-	return r.softDelete(ctx, id, userID, "")
+	return circuitbreaker.Execute(r.breaker, func() (domain.Avatar, error) {
+		return r.softDelete(ctx, id, userID, "")
+	})
 }
 
 // SoftDeleteWithDeleteEvent помечает аватар удаленным и сохраняет событие удаления в outbox в той же транзакции.
 func (r *PostgresRepository) SoftDeleteWithDeleteEvent(ctx context.Context, id, userID, messageID string) (domain.Avatar, domain.AvatarDeleteEvent, error) {
-	avatar, err := r.softDelete(ctx, id, userID, messageID)
+	result, err := circuitbreaker.Execute(r.breaker, func() (struct {
+		avatar domain.Avatar
+		event  domain.AvatarDeleteEvent
+	}, error) {
+		avatar, err := r.softDelete(ctx, id, userID, messageID)
+		if err != nil {
+			return struct {
+				avatar domain.Avatar
+				event  domain.AvatarDeleteEvent
+			}{}, err
+		}
+		return struct {
+			avatar domain.Avatar
+			event  domain.AvatarDeleteEvent
+		}{avatar: avatar, event: domain.AvatarDeleteEvent{MessageID: messageID, AvatarID: avatar.ID, S3Keys: s3Keys(avatar)}}, nil
+	})
 	if err != nil {
 		return domain.Avatar{}, domain.AvatarDeleteEvent{}, err
 	}
-	return avatar, domain.AvatarDeleteEvent{MessageID: messageID, AvatarID: avatar.ID, S3Keys: s3Keys(avatar)}, nil
+	return result.avatar, result.event, nil
 }
 
 func (r *PostgresRepository) softDelete(ctx context.Context, id, userID, deleteMessageID string) (domain.Avatar, error) {
@@ -252,6 +300,12 @@ func s3Keys(avatar domain.Avatar) []string {
 
 // MarkProcessing пытается взять аватар в обработку и защищает worker от двойной работы.
 func (r *PostgresRepository) MarkProcessing(ctx context.Context, id string) (bool, error) {
+	return circuitbreaker.Execute(r.breaker, func() (bool, error) {
+		return r.markProcessing(ctx, id)
+	})
+}
+
+func (r *PostgresRepository) markProcessing(ctx context.Context, id string) (bool, error) {
 	ctx, span := observability.Tracer().Start(ctx, "db.mark_avatar_processing")
 	defer span.End()
 	span.SetAttributes(attribute.String("avatar_id", id))
@@ -270,6 +324,12 @@ func (r *PostgresRepository) MarkProcessing(ctx context.Context, id string) (boo
 
 // UpdateProcessed сохраняет готовые миниатюры и переводит аватар в статус completed.
 func (r *PostgresRepository) UpdateProcessed(ctx context.Context, id string, thumbnails []domain.Thumbnail) error {
+	return circuitbreaker.ExecuteVoid(r.breaker, func() error {
+		return r.updateProcessed(ctx, id, thumbnails)
+	})
+}
+
+func (r *PostgresRepository) updateProcessed(ctx context.Context, id string, thumbnails []domain.Thumbnail) error {
 	ctx, span := observability.Tracer().Start(ctx, "db.update_avatar_processed")
 	defer span.End()
 	span.SetAttributes(attribute.String("avatar_id", id), attribute.Int("thumbnails", len(thumbnails)))
@@ -292,6 +352,12 @@ func (r *PostgresRepository) UpdateProcessed(ctx context.Context, id string, thu
 
 // UpdateProcessingFailed помечает аватар как failed, если worker не смог его обработать.
 func (r *PostgresRepository) UpdateProcessingFailed(ctx context.Context, id string) error {
+	return circuitbreaker.ExecuteVoid(r.breaker, func() error {
+		return r.updateProcessingFailed(ctx, id)
+	})
+}
+
+func (r *PostgresRepository) updateProcessingFailed(ctx context.Context, id string) error {
 	ctx, span := observability.Tracer().Start(ctx, "db.update_avatar_processing_failed")
 	defer span.End()
 	span.SetAttributes(attribute.String("avatar_id", id))
@@ -304,6 +370,12 @@ func (r *PostgresRepository) UpdateProcessingFailed(ctx context.Context, id stri
 
 // ProcessedMessage проверяет, обрабатывали ли мы уже сообщение с таким MessageID.
 func (r *PostgresRepository) ProcessedMessage(ctx context.Context, messageID string) (bool, error) {
+	return circuitbreaker.Execute(r.breaker, func() (bool, error) {
+		return r.processedMessage(ctx, messageID)
+	})
+}
+
+func (r *PostgresRepository) processedMessage(ctx context.Context, messageID string) (bool, error) {
 	ctx, span := observability.Tracer().Start(ctx, "db.processed_message")
 	defer span.End()
 	span.SetAttributes(attribute.String("message_id", messageID))
@@ -317,6 +389,12 @@ func (r *PostgresRepository) ProcessedMessage(ctx context.Context, messageID str
 
 // SaveProcessedMessage запоминает MessageID после успешной обработки события.
 func (r *PostgresRepository) SaveProcessedMessage(ctx context.Context, messageID string) error {
+	return circuitbreaker.ExecuteVoid(r.breaker, func() error {
+		return r.saveProcessedMessage(ctx, messageID)
+	})
+}
+
+func (r *PostgresRepository) saveProcessedMessage(ctx context.Context, messageID string) error {
 	ctx, span := observability.Tracer().Start(ctx, "db.save_processed_message")
 	defer span.End()
 	span.SetAttributes(attribute.String("message_id", messageID))
@@ -329,6 +407,12 @@ func (r *PostgresRepository) SaveProcessedMessage(ctx context.Context, messageID
 
 // MarkOutboxPublished помечает outbox-сообщение опубликованным.
 func (r *PostgresRepository) MarkOutboxPublished(ctx context.Context, messageID string) error {
+	return circuitbreaker.ExecuteVoid(r.breaker, func() error {
+		return r.markOutboxPublished(ctx, messageID)
+	})
+}
+
+func (r *PostgresRepository) markOutboxPublished(ctx context.Context, messageID string) error {
 	ctx, span := observability.Tracer().Start(ctx, "db.mark_outbox_published")
 	defer span.End()
 	span.SetAttributes(attribute.String("message_id", messageID))
@@ -341,6 +425,12 @@ func (r *PostgresRepository) MarkOutboxPublished(ctx context.Context, messageID 
 
 // PendingOutbox возвращает неопубликованные outbox-сообщения от старых к новым.
 func (r *PostgresRepository) PendingOutbox(ctx context.Context, limit int) ([]domain.OutboxMessage, error) {
+	return circuitbreaker.Execute(r.breaker, func() ([]domain.OutboxMessage, error) {
+		return r.pendingOutbox(ctx, limit)
+	})
+}
+
+func (r *PostgresRepository) pendingOutbox(ctx context.Context, limit int) ([]domain.OutboxMessage, error) {
 	ctx, span := observability.Tracer().Start(ctx, "db.pending_outbox")
 	defer span.End()
 	span.SetAttributes(attribute.Int("limit", limit))
@@ -373,6 +463,12 @@ func (r *PostgresRepository) PendingOutbox(ctx context.Context, limit int) ([]do
 }
 
 func (r *PostgresRepository) StorageUsageByUser(ctx context.Context) (map[string]int64, error) {
+	return circuitbreaker.Execute(r.breaker, func() (map[string]int64, error) {
+		return r.storageUsageByUser(ctx)
+	})
+}
+
+func (r *PostgresRepository) storageUsageByUser(ctx context.Context) (map[string]int64, error) {
 	ctx, span := observability.Tracer().Start(ctx, "db.storage_usage_by_user")
 	defer span.End()
 	rows, err := r.pool.Query(ctx, `
@@ -406,7 +502,9 @@ func (r *PostgresRepository) StorageUsageByUser(ctx context.Context) (map[string
 
 // Ping проверяет, что PostgreSQL доступен.
 func (r *PostgresRepository) Ping(ctx context.Context) error {
-	return r.pool.Ping(ctx)
+	return circuitbreaker.ExecuteVoid(r.breaker, func() error {
+		return r.pool.Ping(ctx)
+	})
 }
 
 // OpenConnections returns current PostgreSQL pool open connections for Prometheus.

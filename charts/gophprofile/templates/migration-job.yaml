@@ -37,14 +37,10 @@ spec:
               psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f /migrations/000001_create_avatars.up.sql
           env:
             - name: DATABASE_URL
-              {{- if .Values.secrets.create }}
-              value: {{ .Values.secrets.databaseURL | quote }}
-              {{- else }}
               valueFrom:
                 secretKeyRef:
                   name: {{ include "gophprofile.secretName" . }}
                   key: DATABASE_URL
-              {{- end }}
           volumeMounts:
             - name: migrations
               mountPath: /migrations

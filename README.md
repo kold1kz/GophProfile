@@ -17,6 +17,7 @@ docker compose up -d --build
 - Readiness: `http://localhost:8080/ready`
 - Metrics: `http://localhost:8080/metrics`
 - Worker metrics: `http://localhost:8081/metrics`
+- Worker health: `http://localhost:8081/healthz`
 - OpenTelemetry Collector health: `http://localhost:13133`
 - PostgreSQL: `localhost:15432`
 - RabbitMQ UI: `http://localhost:15672` (`guest` / `guest`)
@@ -101,7 +102,7 @@ curl http://localhost:8080/health
 
 ### Production-like деплой
 
-В production не храните секреты в `values.yaml`. Создайте Secret заранее:
+В `values.yaml` секреты по умолчанию пустые, чтобы сервис не стартовал с публично известными паролями. Для production не храните секреты в values-файлах и создайте Secret заранее:
 
 ```bash
 kubectl -n gophprofile create secret generic gophprofile-secrets \
@@ -134,6 +135,8 @@ helm upgrade --install gophprofile ./charts/gophprofile \
 --set networkPolicy.enabled=false
 ```
 
+Если зависимостям нужны egress-правила не по namespace labels, задайте конкретные CIDR через `networkPolicy.egressIPBlocks`; chart не открывает fallback на `0.0.0.0/0`.
+
 ## Graceful Shutdown
 
 `server` обрабатывает `SIGTERM` через `signal.NotifyContext`, завершает HTTP server через `Shutdown` и использует настраиваемый `SHUTDOWN_DELAY` с дефолтом `10s`. RabbitMQ reconnect loop останавливается через `Close`, поэтому shutdown не блокируется долгим backoff sleep.
@@ -142,6 +145,7 @@ helm upgrade --install gophprofile ./charts/gophprofile \
 
 - Liveness probe использует `/live` и проверяет только процесс HTTP-сервера.
 - Readiness probe использует `/ready` и проверяет PostgreSQL, MinIO и RabbitMQ.
+- Worker probes используют `/healthz` на metrics-порту и проверяют PostgreSQL, MinIO и RabbitMQ; `/metrics` остается только endpoint для Prometheus.
 - HTTP rate limiting включен на уровне middleware. Настройки: `RATE_LIMIT_RPS` и `RATE_LIMIT_BURST`.
 - Circuit breaker включен для PostgreSQL, MinIO и RabbitMQ. После серии ошибок breaker временно прекращает обращения к проблемной зависимости и возвращает ошибку `circuit breaker is open`.
 - Контейнер запускается non-root пользователем `10001`, а Kubernetes chart дополнительно задает `runAsNonRoot`, `readOnlyRootFilesystem`, `seccompProfile` и сброс Linux capabilities.

@@ -16,7 +16,6 @@ import (
 	"gophprofile/internal/handlers"
 	"gophprofile/internal/observability"
 	"gophprofile/internal/repository"
-	"gophprofile/internal/resilience"
 	"gophprofile/internal/services"
 	"gophprofile/internal/storage"
 )
@@ -92,15 +91,11 @@ func main() {
 			return float64(depth)
 		},
 	)
-	resilientRepo := resilience.NewRepository(repo)
-	resilientStorage := resilience.NewObjectStorage(s3)
-	resilientBroker := resilience.NewEventPublisher(broker)
-
-	service := services.NewAvatarService(resilientRepo, resilientStorage, resilientBroker, cfg.MaxFileSize)
+	service := services.NewAvatarService(repo, s3, broker, cfg.MaxFileSize)
 	go runOutboxPublisher(ctx, service, logger)
 	handler := handlers.NewAvatarHandler(
 		service,
-		api.Health{DB: resilientRepo, S3: resilientStorage, Broker: resilientBroker},
+		api.Health{DB: repo, S3: s3, Broker: broker},
 		cfg.MaxFileSize,
 		handlers.WithRateLimit(handlers.RateLimitConfig{
 			RequestsPerSecond: cfg.RateLimitRPS,

@@ -38,15 +38,18 @@ spec:
           port: 53
         - protocol: TCP
           port: 53
+    {{- if or .Values.networkPolicy.egressNamespaceLabels .Values.networkPolicy.egressIPBlocks }}
     - to:
         {{- if .Values.networkPolicy.egressNamespaceLabels }}
         - namespaceSelector:
             matchLabels:
               {{- toYaml .Values.networkPolicy.egressNamespaceLabels | nindent 14 }}
-        {{- else }}
-        - ipBlock:
-            cidr: 0.0.0.0/0
         {{- end }}
+        {{- range .Values.networkPolicy.egressIPBlocks }}
+        - ipBlock:
+            {{- toYaml . | nindent 12 }}
+        {{- end }}
+    {{- end }}
     {{- with .Values.networkPolicy.extraEgress }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
@@ -83,15 +86,18 @@ spec:
           port: 53
         - protocol: TCP
           port: 53
+    {{- if or .Values.networkPolicy.egressNamespaceLabels .Values.networkPolicy.egressIPBlocks }}
     - to:
         {{- if .Values.networkPolicy.egressNamespaceLabels }}
         - namespaceSelector:
             matchLabels:
               {{- toYaml .Values.networkPolicy.egressNamespaceLabels | nindent 14 }}
-        {{- else }}
-        - ipBlock:
-            cidr: 0.0.0.0/0
         {{- end }}
+        {{- range .Values.networkPolicy.egressIPBlocks }}
+        - ipBlock:
+            {{- toYaml . | nindent 12 }}
+        {{- end }}
+    {{- end }}
     {{- with .Values.networkPolicy.extraEgress }}
     {{- toYaml . | nindent 4 }}
     {{- end }}

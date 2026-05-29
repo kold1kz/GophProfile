@@ -46,12 +46,12 @@ spec:
             {{- include "gophprofile.commonEnv" . | nindent 12 }}
           livenessProbe:
             httpGet:
-              path: /metrics
+              path: /healthz
               port: metrics
             {{- toYaml .Values.probes.liveness | nindent 12 }}
           readinessProbe:
             httpGet:
-              path: /metrics
+              path: /healthz
               port: metrics
             {{- toYaml .Values.probes.readiness | nindent 12 }}
           resources:
