@@ -11,6 +11,7 @@ import (
 
 	"gophprofile/internal/domain"
 	"gophprofile/internal/observability"
+	"gophprofile/pkg/circuitbreaker"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 	"go.opentelemetry.io/otel"
@@ -45,6 +46,7 @@ type RabbitMQ struct {
 	dlx        string
 	deadLetter string
 	done       chan struct{}
+	breaker    *circuitbreaker.CircuitBreaker
 }
 
 // NewRabbitMQ подключается к RabbitMQ и объявляет все сущности, нужные для надежной доставки.
@@ -56,6 +58,7 @@ func NewRabbitMQ(url, exchange, queue string) (*RabbitMQ, error) {
 		dlx:        exchange + ".dlx",
 		deadLetter: queue + ".dlq",
 		done:       make(chan struct{}),
+		breaker:    circuitbreaker.New("rabbitmq"),
 	}
 	if err := r.connect(); err != nil {
 		return nil, err
@@ -147,45 +150,55 @@ func (r *RabbitMQ) declare() error {
 
 // PublishUpload публикует событие о новой загрузке и ждет confirm от брокера.
 func (r *RabbitMQ) PublishUpload(ctx context.Context, event domain.AvatarUploadEvent) error {
-	return r.publish(ctx, RoutingAvatarUploaded, event.MessageID, event)
+	return circuitbreaker.ExecuteVoid(r.breaker, func() error {
+		return r.publish(ctx, RoutingAvatarUploaded, event.MessageID, event)
+	})
 }
 
 // PublishDelete публикует событие удаления и ждет confirm от брокера.
 func (r *RabbitMQ) PublishDelete(ctx context.Context, event domain.AvatarDeleteEvent) error {
-	return r.publish(ctx, RoutingAvatarDeleted, event.MessageID, event)
+	return circuitbreaker.ExecuteVoid(r.breaker, func() error {
+		return r.publish(ctx, RoutingAvatarDeleted, event.MessageID, event)
+	})
 }
 
 // Consume подписывает worker на очередь в режиме manual ack.
 func (r *RabbitMQ) Consume() (<-chan amqp.Delivery, error) {
-	r.mu.RLock()
-	ch := r.consumeCh
-	r.mu.RUnlock()
-	return ch.Consume(r.queue, "", false, false, false, false, nil)
+	return circuitbreaker.Execute(r.breaker, func() (<-chan amqp.Delivery, error) {
+		r.mu.RLock()
+		ch := r.consumeCh
+		r.mu.RUnlock()
+		return ch.Consume(r.queue, "", false, false, false, false, nil)
+	})
 }
 
 // Ping проверяет, что exchange существует и канал RabbitMQ жив.
 func (r *RabbitMQ) Ping(ctx context.Context) error {
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	default:
-	}
-	r.mu.RLock()
-	ch := r.consumeCh
-	r.mu.RUnlock()
-	return ch.ExchangeDeclarePassive(r.exchange, "topic", true, false, false, false, nil)
+	return circuitbreaker.ExecuteVoid(r.breaker, func() error {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		r.mu.RLock()
+		ch := r.consumeCh
+		r.mu.RUnlock()
+		return ch.ExchangeDeclarePassive(r.exchange, "topic", true, false, false, false, nil)
+	})
 }
 
 // QueueDepth returns the current number of ready messages in the worker queue.
 func (r *RabbitMQ) QueueDepth() (int, error) {
-	r.mu.RLock()
-	ch := r.consumeCh
-	r.mu.RUnlock()
-	queue, err := ch.QueueInspect(r.queue)
-	if err != nil {
-		return 0, err
-	}
-	return queue.Messages, nil
+	return circuitbreaker.Execute(r.breaker, func() (int, error) {
+		r.mu.RLock()
+		ch := r.consumeCh
+		r.mu.RUnlock()
+		queue, err := ch.QueueInspect(r.queue)
+		if err != nil {
+			return 0, err
+		}
+		return queue.Messages, nil
+	})
 }
 
 // Close закрывает каналы и соединение с RabbitMQ.

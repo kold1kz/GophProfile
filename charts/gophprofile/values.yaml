@@ -1,0 +1,191 @@
+replicaCount: 2
+
+image:
+  repository: gophprofile-server
+  tag: latest
+  pullPolicy: IfNotPresent
+
+worker:
+  replicaCount: 1
+  command:
+    - /app/worker
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  autoscaling:
+    enabled: true
+    minReplicas: 1
+    maxReplicas: 4
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: http
+
+workerMetricsService:
+  type: ClusterIP
+  port: 8081
+  targetPort: metrics
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations: {}
+  hosts:
+    - host: gophprofile.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+config:
+  httpAddr: ":8080"
+  workerMetricsAddr: ":8081"
+  publicBaseURL: "http://gophprofile.local"
+  s3Endpoint: "minio:9000"
+  s3Bucket: avatars
+  s3UseSSL: "false"
+  rabbitExchange: avatars.exchange
+  rabbitQueue: avatars.worker
+  otlpEndpoint: ""
+  maxFileSize: "10485760"
+  shutdownDelay: 10s
+  rateLimitRPS: "20"
+  rateLimitBurst: "40"
+
+secrets:
+  create: true
+  name: ""
+  databaseURL: ""
+  s3AccessKey: ""
+  s3SecretKey: ""
+  rabbitURL: ""
+
+probes:
+  liveness:
+    initialDelaySeconds: 20
+    periodSeconds: 20
+    timeoutSeconds: 3
+    failureThreshold: 3
+  readiness:
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 3
+
+serviceMonitor:
+  enabled: true
+  interval: 30s
+  scrapeTimeout: 10s
+  labels: {}
+
+networkPolicy:
+  enabled: true
+  ingressNamespaceLabels:
+    kubernetes.io/metadata.name: ingress-nginx
+  monitoringNamespaceLabels:
+    kubernetes.io/metadata.name: monitoring
+  dnsNamespaceLabels:
+    kubernetes.io/metadata.name: kube-system
+  egressNamespaceLabels: {}
+  egressIPBlocks: []
+  extraEgress: []
+
+migrations:
+  enabled: true
+  image:
+    repository: postgres
+    tag: "16-alpine"
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 250m
+      memory: 256Mi
+
+localInfrastructure:
+  enabled: false
+  postgresql:
+    image: postgres:16-alpine
+    storage: 1Gi
+    database: gophprofile
+    username: root
+    password: root
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+  minio:
+    image: minio/minio:RELEASE.2024-03-30T09-41-56Z
+    storage: 2Gi
+    rootUser: admin
+    rootPassword: adminadmin
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 1Gi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

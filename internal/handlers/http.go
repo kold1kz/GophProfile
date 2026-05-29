@@ -8,8 +8,11 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
 
 	"gophprofile/internal/domain"
 	"gophprofile/internal/observability"
@@ -26,6 +29,23 @@ type AvatarHandler struct {
 	service     AvatarService
 	health      HealthChecker
 	maxFileSize int64
+	rateLimit   RateLimitConfig
+}
+
+// RateLimitConfig configures a small in-process token bucket for HTTP requests.
+type RateLimitConfig struct {
+	RequestsPerSecond float64
+	Burst             int
+}
+
+// Option changes HTTP handler behavior without forcing tests to pass production-only settings.
+type Option func(*AvatarHandler)
+
+// WithRateLimit enables request rate limiting when both values are positive.
+func WithRateLimit(config RateLimitConfig) Option {
+	return func(h *AvatarHandler) {
+		h.rateLimit = config
+	}
 }
 
 // AvatarService описывает методы бизнес-логики, которые нужны HTTP-слою.
@@ -45,14 +65,23 @@ type HealthChecker interface {
 }
 
 // NewAvatarHandler собирает HTTP-обработчик с сервисом аватаров и health-checker'ом.
-func NewAvatarHandler(service AvatarService, health HealthChecker, maxFileSize int64) *AvatarHandler {
-	return &AvatarHandler{service: service, health: health, maxFileSize: maxFileSize}
+func NewAvatarHandler(service AvatarService, health HealthChecker, maxFileSize int64, opts ...Option) *AvatarHandler {
+	handler := &AvatarHandler{service: service, health: health, maxFileSize: maxFileSize}
+	for _, opt := range opts {
+		opt(handler)
+	}
+	return handler
 }
 
 // Routes строит HTTP-маршруты API и подключает готовый static frontend.
 func (h *AvatarHandler) Routes() http.Handler {
 	r := chi.NewRouter()
 	r.Use(observability.HTTPMiddleware)
+	if h.rateLimit.RequestsPerSecond > 0 && h.rateLimit.Burst > 0 {
+		r.Use(newRateLimiter(h.rateLimit).middleware)
+	}
+	r.Get("/live", h.liveCheck)
+	r.Get("/ready", h.healthCheck)
 	r.Get("/health", h.healthCheck)
 	r.Handle("/metrics", promhttp.Handler())
 
@@ -186,6 +215,60 @@ func (h *AvatarHandler) deleteUserAvatar(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *AvatarHandler) liveCheck(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+type rateLimiter struct {
+	mu       sync.Mutex
+	tokens   float64
+	capacity float64
+	rate     float64
+	last     time.Time
+}
+
+func newRateLimiter(config RateLimitConfig) *rateLimiter {
+	burst := math.Max(1, float64(config.Burst))
+	rps := math.Max(1, config.RequestsPerSecond)
+	return &rateLimiter{
+		tokens:   burst,
+		capacity: burst,
+		rate:     rps,
+		last:     time.Now(),
+	}
+}
+
+func (l *rateLimiter) middleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/live", "/ready", "/health", "/metrics":
+			next.ServeHTTP(w, r)
+			return
+		}
+		if !l.allow() {
+			w.Header().Set("Retry-After", "1")
+			writeError(w, http.StatusTooManyRequests, "Too many requests", "Rate limit exceeded")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (l *rateLimiter) allow() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	now := time.Now()
+	elapsed := now.Sub(l.last).Seconds()
+	l.last = now
+	l.tokens = math.Min(l.capacity, l.tokens+elapsed*l.rate)
+	if l.tokens < 1 {
+		return false
+	}
+	l.tokens--
+	return true
 }
 
 func (h *AvatarHandler) healthCheck(w http.ResponseWriter, r *http.Request) {

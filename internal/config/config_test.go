@@ -25,6 +25,8 @@ RABBITMQ_EXCHANGE=profile.exchange
 RABBITMQ_QUEUE=profile.worker
 MAX_FILE_SIZE=2048
 SHUTDOWN_DELAY=3s
+RATE_LIMIT_RPS=12.5
+RATE_LIMIT_BURST=25
 `)
 	unsetConfigEnv(t)
 
@@ -44,6 +46,8 @@ SHUTDOWN_DELAY=3s
 	require.Equal(t, "profile.worker", cfg.RabbitQueue)
 	require.EqualValues(t, 2048, cfg.MaxFileSize)
 	require.Equal(t, 3*time.Second, cfg.ShutdownDelay)
+	require.Equal(t, 12.5, cfg.RateLimitRPS)
+	require.Equal(t, 25, cfg.RateLimitBurst)
 }
 
 func TestLoadDoesNotOverrideExistingEnvironment(t *testing.T) {
@@ -174,6 +178,8 @@ func unsetConfigEnv(t *testing.T) {
 		"OTEL_EXPORTER_OTLP_ENDPOINT",
 		"MAX_FILE_SIZE",
 		"SHUTDOWN_DELAY",
+		"RATE_LIMIT_RPS",
+		"RATE_LIMIT_BURST",
 	} {
 		t.Setenv(key, "")
 		require.NoError(t, os.Unsetenv(key))

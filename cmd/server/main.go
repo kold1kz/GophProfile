@@ -93,7 +93,15 @@ func main() {
 	)
 	service := services.NewAvatarService(repo, s3, broker, cfg.MaxFileSize)
 	go runOutboxPublisher(ctx, service, logger)
-	handler := handlers.NewAvatarHandler(service, api.Health{DB: repo, S3: s3, Broker: broker}, cfg.MaxFileSize)
+	handler := handlers.NewAvatarHandler(
+		service,
+		api.Health{DB: repo, S3: s3, Broker: broker},
+		cfg.MaxFileSize,
+		handlers.WithRateLimit(handlers.RateLimitConfig{
+			RequestsPerSecond: cfg.RateLimitRPS,
+			Burst:             cfg.RateLimitBurst,
+		}),
+	)
 
 	server := &http.Server{
 		Addr:    cfg.HTTPAddr,

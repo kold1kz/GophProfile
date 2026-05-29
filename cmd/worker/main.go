@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"gophprofile/internal/api"
 	"gophprofile/internal/app"
 	"gophprofile/internal/config"
 	"gophprofile/internal/observability"
@@ -76,8 +78,9 @@ func main() {
 	}
 	defer broker.Close()
 
-	w := avatarworker.New(repository.NewPostgres(db), s3, broker)
-	metricsServer := startMetricsServer(cfg.WorkerMetricsAddr, logger)
+	repo := repository.NewPostgres(db)
+	w := avatarworker.New(repo, s3, broker)
+	metricsServer := startMetricsServer(cfg.WorkerMetricsAddr, logger, api.Health{DB: repo, S3: s3, Broker: broker})
 	defer func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -92,9 +95,22 @@ func main() {
 	}
 }
 
-func startMetricsServer(addr string, logger *slog.Logger) *http.Server {
+func startMetricsServer(addr string, logger *slog.Logger, health api.Health) *http.Server {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.Handler())
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		result := health.Check(r)
+		status := http.StatusOK
+		for _, componentStatus := range result {
+			if componentStatus != "ok" {
+				status = http.StatusServiceUnavailable
+				break
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(result)
+	})
 	server := &http.Server{Addr: addr, Handler: mux}
 	go func() {
 		logger.Info("worker metrics listening", "addr", addr)

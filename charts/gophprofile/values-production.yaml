@@ -1,0 +1,40 @@
+replicaCount: 3
+
+image:
+  repository: registry.example.com/gophprofile/server
+  tag: "1.0.0"
+  pullPolicy: IfNotPresent
+
+config:
+  publicBaseURL: "https://avatars.example.com"
+  s3Endpoint: "minio.storage.svc.cluster.local:9000"
+  s3UseSSL: "false"
+  otlpEndpoint: "otel-collector.observability.svc.cluster.local:4317"
+
+secrets:
+  create: false
+  name: gophprofile-secrets
+
+ingress:
+  enabled: true
+  className: nginx
+  hosts:
+    - host: avatars.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: avatars-example-com-tls
+      hosts:
+        - avatars.example.com
+
+networkPolicy:
+  enabled: true
+  ingressNamespaceLabels:
+    kubernetes.io/metadata.name: ingress-nginx
+  monitoringNamespaceLabels:
+    kubernetes.io/metadata.name: monitoring
+  dnsNamespaceLabels:
+    kubernetes.io/metadata.name: kube-system
+  egressNamespaceLabels:
+    kubernetes.io/metadata.name: infrastructure

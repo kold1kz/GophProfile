@@ -94,6 +94,37 @@ func TestAvatarHandlerRoutes(t *testing.T) {
 		require.Contains(t, rec.Body.String(), `"status":"degraded"`)
 	})
 
+	t.Run("liveness does not check dependencies", func(t *testing.T) {
+		router := NewAvatarHandler(&fakeAvatarService{}, fakeHealth{"db": "error"}, 1024).Routes()
+		rec := httptest.NewRecorder()
+
+		router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/live", nil))
+
+		require.Equal(t, http.StatusOK, rec.Code)
+		require.Contains(t, rec.Body.String(), `"status":"ok"`)
+	})
+
+	t.Run("rate limit protects api and skips probes", func(t *testing.T) {
+		router := NewAvatarHandler(
+			&fakeAvatarService{},
+			fakeHealth{"db": "ok"},
+			1024,
+			WithRateLimit(RateLimitConfig{RequestsPerSecond: 1, Burst: 1}),
+		).Routes()
+
+		first := httptest.NewRecorder()
+		router.ServeHTTP(first, multipartUploadRequest(t, http.MethodPost, "/api/v1/avatars", "file", "avatar.jpg", []byte("data"), nil))
+		require.Equal(t, http.StatusBadRequest, first.Code)
+
+		second := httptest.NewRecorder()
+		router.ServeHTTP(second, multipartUploadRequest(t, http.MethodPost, "/api/v1/avatars", "file", "avatar.jpg", []byte("data"), nil))
+		require.Equal(t, http.StatusTooManyRequests, second.Code)
+
+		probe := httptest.NewRecorder()
+		router.ServeHTTP(probe, httptest.NewRequest(http.MethodGet, "/live", nil))
+		require.Equal(t, http.StatusOK, probe.Code)
+	})
+
 	t.Run("api upload requires user header", func(t *testing.T) {
 		router := NewAvatarHandler(&fakeAvatarService{}, fakeHealth{}, 1024).Routes()
 		rec := httptest.NewRecorder()

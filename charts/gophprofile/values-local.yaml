@@ -1,0 +1,42 @@
+replicaCount: 1
+
+image:
+  repository: gophprofile-server
+  tag: latest
+  pullPolicy: Never
+
+ingress:
+  enabled: true
+  className: nginx
+  hosts:
+    - host: gophprofile.local
+      paths:
+        - path: /
+          pathType: Prefix
+
+autoscaling:
+  enabled: false
+
+worker:
+  autoscaling:
+    enabled: false
+
+serviceMonitor:
+  enabled: false
+
+networkPolicy:
+  enabled: false
+
+config:
+  publicBaseURL: "http://gophprofile.local"
+  s3Endpoint: "gophprofile-minio:9000"
+  otlpEndpoint: ""
+
+secrets:
+  databaseURL: "postgres://root:root@gophprofile-postgresql:5432/gophprofile?sslmode=disable"
+  s3AccessKey: admin
+  s3SecretKey: adminadmin
+  rabbitURL: "amqp://guest:guest@gophprofile-rabbitmq:5672/"
+
+localInfrastructure:
+  enabled: true

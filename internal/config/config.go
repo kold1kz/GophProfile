@@ -28,6 +28,8 @@ type Config struct {
 	OTLPEndpoint   string
 	MaxFileSize    int64
 	ShutdownDelay  time.Duration
+	RateLimitRPS   float64
+	RateLimitBurst int
 }
 
 // LoadE собирает конфигурацию приложения и возвращает ошибку, если не хватает обязательных секретов.
@@ -81,6 +83,8 @@ func LoadE() (Config, error) {
 		OTLPEndpoint:      getenv("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
 		MaxFileSize:       getenvInt64("MAX_FILE_SIZE", 10<<20),
 		ShutdownDelay:     shutdownDelay,
+		RateLimitRPS:      getenvFloat64("RATE_LIMIT_RPS", 20),
+		RateLimitBurst:    getenvInt("RATE_LIMIT_BURST", 40),
 	}, nil
 }
 
@@ -161,6 +165,30 @@ func getenvInt64(key string, fallback int64) int64 {
 		return fallback
 	}
 	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func getenvInt(key string, fallback int) int {
+	value, ok := os.LookupEnv(key)
+	if !ok || value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func getenvFloat64(key string, fallback float64) float64 {
+	value, ok := os.LookupEnv(key)
+	if !ok || value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
 	if err != nil {
 		return fallback
 	}

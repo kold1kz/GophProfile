@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"gophprofile/internal/observability"
+	"gophprofile/pkg/circuitbreaker"
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
@@ -19,6 +20,7 @@ type MinIOStorage struct {
 	client        *minio.Client
 	presignClient *minio.Client
 	bucket        string
+	breaker       *circuitbreaker.CircuitBreaker
 }
 
 // NewMinIO создает клиент MinIO и гарантирует, что нужный bucket уже существует.
@@ -46,7 +48,12 @@ func NewMinIO(ctx context.Context, endpoint, publicBaseURL, accessKey, secretKey
 			return nil, err
 		}
 	}
-	storage := &MinIOStorage{client: client, presignClient: presignClient, bucket: bucket}
+	storage := &MinIOStorage{
+		client:        client,
+		presignClient: presignClient,
+		bucket:        bucket,
+		breaker:       circuitbreaker.New("s3"),
+	}
 	if err := storage.ensureBucket(ctx); err != nil {
 		return nil, err
 	}
@@ -87,6 +94,12 @@ func (s *MinIOStorage) ensureBucket(ctx context.Context) error {
 
 // Upload сохраняет объект в bucket под переданным ключом.
 func (s *MinIOStorage) Upload(ctx context.Context, key, contentType string, size int64, body io.Reader) error {
+	return circuitbreaker.ExecuteVoid(s.breaker, func() error {
+		return s.upload(ctx, key, contentType, size, body)
+	})
+}
+
+func (s *MinIOStorage) upload(ctx context.Context, key, contentType string, size int64, body io.Reader) error {
 	ctx, span := observability.Tracer().Start(ctx, "s3.upload_object")
 	defer span.End()
 	span.SetAttributes(attribute.String("s3.key", key), attribute.String("content_type", contentType), attribute.Int64("size", size))
@@ -100,6 +113,20 @@ func (s *MinIOStorage) Upload(ctx context.Context, key, contentType string, size
 
 // Download открывает объект на чтение и возвращает его content type.
 func (s *MinIOStorage) Download(ctx context.Context, key string) (io.ReadCloser, string, error) {
+	result, err := circuitbreaker.Execute(s.breaker, func() (struct {
+		body        io.ReadCloser
+		contentType string
+	}, error) {
+		body, contentType, err := s.download(ctx, key)
+		return struct {
+			body        io.ReadCloser
+			contentType string
+		}{body: body, contentType: contentType}, err
+	})
+	return result.body, result.contentType, err
+}
+
+func (s *MinIOStorage) download(ctx context.Context, key string) (io.ReadCloser, string, error) {
 	ctx, span := observability.Tracer().Start(ctx, "s3.download_object")
 	defer span.End()
 	span.SetAttributes(attribute.String("s3.key", key))
@@ -121,6 +148,12 @@ func (s *MinIOStorage) Download(ctx context.Context, key string) (io.ReadCloser,
 
 // Delete удаляет объект из bucket; для несуществующего ключа MinIO обычно не считает это ошибкой.
 func (s *MinIOStorage) Delete(ctx context.Context, key string) error {
+	return circuitbreaker.ExecuteVoid(s.breaker, func() error {
+		return s.delete(ctx, key)
+	})
+}
+
+func (s *MinIOStorage) delete(ctx context.Context, key string) error {
 	ctx, span := observability.Tracer().Start(ctx, "s3.delete_object")
 	defer span.End()
 	span.SetAttributes(attribute.String("s3.key", key))
@@ -134,6 +167,12 @@ func (s *MinIOStorage) Delete(ctx context.Context, key string) error {
 
 // PresignedGetURL создает временную ссылку на объект, чтобы ее можно было вернуть клиенту.
 func (s *MinIOStorage) PresignedGetURL(ctx context.Context, key string) (string, error) {
+	return circuitbreaker.Execute(s.breaker, func() (string, error) {
+		return s.presignedGetURL(ctx, key)
+	})
+}
+
+func (s *MinIOStorage) presignedGetURL(ctx context.Context, key string) (string, error) {
 	_, span := observability.Tracer().Start(ctx, "s3.presign_get_object")
 	defer span.End()
 	span.SetAttributes(attribute.String("s3.key", key))
@@ -148,6 +187,8 @@ func (s *MinIOStorage) PresignedGetURL(ctx context.Context, key string) (string,
 
 // Ping проверяет доступность bucket в MinIO.
 func (s *MinIOStorage) Ping(ctx context.Context) error {
-	_, err := s.client.BucketExists(ctx, s.bucket)
-	return err
+	return circuitbreaker.ExecuteVoid(s.breaker, func() error {
+		_, err := s.client.BucketExists(ctx, s.bucket)
+		return err
+	})
 }

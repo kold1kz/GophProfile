@@ -1,0 +1,56 @@
+{{- if .Values.migrations.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "gophprofile.fullname" . }}-migrate
+  labels:
+    {{- include "gophprofile.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": {{ ternary "post-install,pre-upgrade" "pre-install,pre-upgrade" .Values.localInfrastructure.enabled | quote }}
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        {{- include "gophprofile.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: migration
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: {{ ternary (include "gophprofile.serviceAccountName" .) "default" .Values.localInfrastructure.enabled }}
+      automountServiceAccountToken: false
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: migrate
+          image: "{{ .Values.migrations.image.repository }}:{{ .Values.migrations.image.tag }}"
+          imagePullPolicy: {{ .Values.migrations.image.pullPolicy }}
+          command:
+            - sh
+            - -ec
+            - |
+              until psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c "SELECT 1"; do
+                echo "waiting for postgres"
+                sleep 2
+              done
+              psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f /migrations/000001_create_avatars.up.sql
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "gophprofile.secretName" . }}
+                  key: DATABASE_URL
+          volumeMounts:
+            - name: migrations
+              mountPath: /migrations
+              readOnly: true
+          resources:
+            {{- toYaml .Values.migrations.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+      volumes:
+        - name: migrations
+          configMap:
+            name: {{ include "gophprofile.fullname" . }}-migrations
+{{- end }}
